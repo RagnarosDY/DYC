@@ -1,0 +1,105 @@
+from keras.applications import ResNet50
+from keras.layers.core import Lambda
+from keras.models import Sequential, Model
+from tensorflow.python.framework import ops
+import tensorflow as tf
+import keras.backend as K
+import numpy as np
+import Net as N
+import keras
+import sys
+import cv2
+import os
+import time
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+
+K.set_learning_phase(0)
+
+def target_category_loss(x, category_index, nb_classes):
+    return tf.multiply(x, K.one_hot([category_index], nb_classes))
+  
+def target_category_loss_output_shape(input_shape):
+    return input_shape
+
+def normalize(x):#对张量进行归一化
+    # utility function to normalize a tensor by its L2 norm
+    return x / (K.sqrt(K.mean(K.square(x))) + 1e-5)
+
+def load_image(path):
+    img = cv2.imread(path)
+    img = cv2.resize(img, (224, 224))
+    img = np.float32(img)
+    img = (img/255 - 0.5)*2
+    img = np.expand_dims(img, axis=0)
+    return img
+
+def grad_cam(model, x, category_index, layer_name):
+   # x = input_model.output
+    nb_classes = 2
+    class_output = model.output[:, category_index]
+
+    # layer output
+    convolution_output = model.get_layer(layer_name).output
+    # get gradients
+    grads = K.gradients(class_output, convolution_output)[0]
+    # get convolution output and gradients for input
+    gradient_function = K.function([model.input], [convolution_output, grads])
+
+    output, grads_val = gradient_function([x])
+    output, grads_val = output[0], grads_val[0]
+
+    # avg
+    weights = np.mean(grads_val, axis=(0, 1))
+    cam = np.dot(output, weights)
+
+    # create heat map
+    cam = cv2.resize(cam, (x.shape[1], x.shape[2]), cv2.INTER_LINEAR)
+    cam = np.maximum(cam, 0)
+    heatmap = cam / np.max(cam)
+
+    # Return to BGR [0..255] from the preprocessed image
+    image_rgb = x[0, :]
+    image_rgb -= np.min(image_rgb)
+    image_rgb = np.minimum(image_rgb, 255)
+
+    cam = cv2.applyColorMap(np.uint8(255 * heatmap), cv2.COLORMAP_JET)
+    cam = np.float32(cam) + np.float32(image_rgb)
+    cam = 255 * cam / np.max(cam)
+    return np.uint8(cam), heatmap
+def deprocess_image(x):
+    '''    Same normalization as in:    https://github.com/fchollet/keras/blob/master/examples/conv_filter_visualization.py    '''
+    if np.ndim(x) > 3:
+        x = np.squeeze(x)
+        # normalize tensor: center on 0., ensure std is 0.1
+        x -= x.mean()
+        x /= (x.std() + 1e-5)
+        x *= 0.1
+        # clip to [0, 1]
+        x += 0.5
+        x = np.clip(x, 0, 1)
+        # convert to RGB array
+        x *= 255
+        if K.image_dim_ordering() == 'th':
+            x = x.transpose((1, 2, 0))
+        x = np.clip(x, 0, 255).astype('uint8')
+        return x
+
+input_model = N.VGG(input_shape = (224,224,3))
+input_model.load_weights("/home/user2/DYC_code/VGG16_finetune.h5")
+
+folder = "/home/user2/dataset/dogvscat/test/1/"
+src = "/home/user2/DYC_code/grad-cam/grad-pic/"
+src1 = "/home/user2/DYC_code/grad-cam/heatmap/"
+classes = 2
+listDir = os.listdir(folder)
+for cz in listDir:
+    start = time.time()
+    #print(cz)
+    path = folder + cz
+    img = load_image(path)
+    predictions = input_model.predict(img)
+    predicted_class = np.argmax(predictions)
+    cam, heatmap = grad_cam(input_model, img, predicted_class, "block3_conv3")
+    cv2.imwrite(src+cz[:-4]+".jpg", cam)
+    #cv2.imwrite(src1 + cz[-4]+"_"+".jpg", heatmap)
+    #print(time.time() - start)

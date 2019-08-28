@@ -1,0 +1,150 @@
+from __future__ import print_function
+import os
+import numpy as np
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+import matplotlib.pyplot as plt
+import ResNet50Clf as RNC
+import ReadSample as RSC
+import ReadSampleV as RSCV
+from keras.optimizers import SGD, Adam, RMSprop
+from keras.utils import multi_gpu_model, plot_model
+from keras.utils import to_categorical
+import keras.backend as K
+import tensorflow as tf
+import time
+from keras.applications.vgg16 import VGG16
+from keras.layers import Dense, GlobalAveragePooling2D
+from keras.callbacks import TensorBoard
+from keras.models import Model
+from keras.layers import Dense, Dropout, Activation, Lambda, add, Input, Flatten
+from keras.regularizers import l2
+from keras.layers import Conv2D, AveragePooling2D, MaxPooling2D
+from keras.layers.normalization import BatchNormalization
+from keras import backend as K
+from keras.applications.resnet50 import ResNet50
+from keras.preprocessing.image import ImageDataGenerator
+from keras.callbacks import EarlyStopping
+from keras.datasets import cifar10
+earlystopping = EarlyStopping(monitor='val_loss', min_delta=0, patience=1, verbose=0, mode='auto')
+gpu_num = 1
+from keras.models import Sequential
+from keras.layers import Dense, Flatten, Dropout
+
+def alexnet(img_input,classes=4):
+    
+    x = Conv2D(48,(11,11),strides=(4,4),padding='same',
+               activation='relu',kernel_initializer='uniform')(img_input)# valid
+   # x = BatchNormalization()(x)
+    x = MaxPooling2D(pool_size=(3,3),strides=(2,2),padding='valid')(x)
+    
+    x = Conv2D(128,(5,5),strides=(1,1),padding='same',
+               activation='relu',kernel_initializer='uniform')(x)
+   # x = BatchNormalization()(x)
+    x = MaxPooling2D(pool_size=(3,3),strides=(2,2),padding='same')(x)
+    x = Conv2D(192,(3,3),strides=(1,1),padding='same',
+               activation='relu',kernel_initializer='uniform')(x) 
+    x = Conv2D(192,(3,3),strides=(1,1),padding='same',
+               activation='relu',kernel_initializer='uniform')(x)  
+    x = Conv2D(128,(3,3),strides=(1,1),padding='same',
+               activation='relu',kernel_initializer='uniform')(x)
+    x = MaxPooling2D(pool_size=(3,3),strides=(2,2),padding='same')(x)
+    x = Flatten()(x)
+    x = Dense(256,activation='relu')(x)
+    x = Dropout(0.5)(x)
+    x = Dense(64,activation='relu')(x)
+    x = Dropout(0.5)(x)
+    out = Dense(classes, activation='softmax')(x)
+    #model = Model(inputs = [img_input], outputs = [out])
+    return out
+img_input=Input(shape=(512, 512,3))
+output = alexnet(img_input)
+model=Model(img_input,output)
+#####################################
+#数据的读取省略
+hist = model.fit(img, y, batch_size=32, epochs=1, verbose=2, validation_split=0.2)
+####################################
+#将keras的 .h5文件转换为tensorflow 二进制格式的pb文件需要重载权重
+model.load_weights('/home/user2/DYC_code/w_R1X_8.h5')
+def freeze_session(session, keep_var_names=None, output_names=None, clear_devices=True):
+    from tensorflow.python.framework.graph_util import convert_variables_to_constants
+    graph = session.graph
+    with graph.as_default():
+        freeze_var_names = list(set(v.op.name for v in tf.global_variables()).difference(keep_var_names or []))
+        output_names = output_names or []
+        output_names += [v.op.name for v in tf.global_variables()]
+        input_graph_def = graph.as_graph_def()
+        if clear_devices:
+            for node in input_graph_def.node:
+                node.device = ""
+        frozen_graph = convert_variables_to_constants(session, input_graph_def,
+                                                    output_names, freeze_var_names)
+        return frozen_graph
+    
+output_graph_name = 'w8.pb'
+output_fld = '/home/user2/DYC_code/'
+#K.set_learning_phase(0)
+ 
+print('input is :', model.input.name)
+print ('output is:', model.output.name)
+ 
+sess = K.get_session()
+frozen_graph = freeze_session(K.get_session(), output_names=[model.output.op.name])
+ 
+from tensorflow.python.framework import graph_io
+graph_io.write_graph(frozen_graph, output_fld, output_graph_name, as_text=False)
+print('saved the constant graph (ready for inference) at: ', os.path.join(output_fld, output_graph_name))
+######输出结果为##########
+input is : input_2:0
+output is: dense_6/Softmax:0
+INFO:tensorflow:Froze 52 variables.
+INFO:tensorflow:Converted 52 variables to const ops.
+saved the constant graph (ready for inference) at:  /home/user2/DYC_code/w8.pb
+##########################
+######测试pb文件效果
+
+import tensorflow as tf
+import numpy as np
+import os
+import cv2
+def predict(jpg_path, pb_file_path):
+    with tf.Graph().as_default():
+        output_graph_def = tf.GraphDef()
+
+        with open(pb_file_path, "rb") as f:
+            output_graph_def.ParseFromString(f.read())
+            tensors = tf.import_graph_def(output_graph_def, name="")
+            # print (tensors)
+        with tf.Session() as sess:
+            init = tf.global_variables_initializer()
+            sess.run(init)
+            sess.graph.get_operations()
+            input_x = sess.graph.get_tensor_by_name("input_2:0")  # 具体名称看上一段代码的input.name
+            out_softmax = sess.graph.get_tensor_by_name("dense_6/Softmax:0")  # 具体名称看上一段代码的output.name
+            img = cv2.imread(jpg_path)
+            img = np.float32(img)/255.
+            img = img - 0.5
+            img = img * 2.
+            img_out_softmax = sess.run(out_softmax,feed_dict={input_x: np.array(img).reshape((-1, 512, 512, 3)) })
+
+            # print (img_out_softmax)
+            return img_out_softmax
+
+
+pb_path = '/home/user2/DYC_code/w8.pb'
+rootdir = '/home/user2/dataset/wenjian/data_p/D/'
+
+if __name__ == '__main__':
+    list = os.listdir(rootdir)
+    for i in range(0,len(list)):
+        path = os.path.join(rootdir, list[i])
+        if os.path.isfile(path):
+            print (path)
+            index = predict(path, pb_path)
+            pred = np.argmax(index, axis = 1)
+            print (index)
+            print(pred)
+
+
+
+
+
